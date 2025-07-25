@@ -123,15 +123,15 @@ class ChallengeConfig:
     
     # Aggressive Risk Settings (90% account per trade)
     POSITION_SIZE_PCT = 0.90  # Use 90% of account per trade
-    MAX_RISK_PER_TRADE = 0.02  # 2% stop loss = $20 risk
-    MAX_DAILY_LOSS = 0.10  # 10% = $100 max daily loss
+    MAX_RISK_PER_TRADE = 0.90  # 90% risk per trade - EXTREMELY AGGRESSIVE
+    MAX_DAILY_LOSS = 0.95  # 95% max daily loss
     MAX_POSITIONS = 1  # Only 1 position at a time
     
     # Scanning Settings
     SCAN_INTERVAL = 300  # 5 minutes (300 seconds)
     
-    # Setup Requirements (STRICT!)
-    MIN_CONFLUENCE_SCORE = 11  # Only 11+ setups
+    # Jim Dalton Market Profile Setup Requirements (A+ ONLY!)
+    MIN_BALANCE_SCORE = 8  # Minimum balance level score for A+ setups (out of 10)
     
     # Notification Settings (FILL THESE IN FOR ALERTS!)
     TELEGRAM_BOT_TOKEN = ""  # Get from @BotFather on Telegram
@@ -205,15 +205,15 @@ class HyperliquidAutoTrader:
         if self.config.TARGET_BALANCE <= self.config.INITIAL_BALANCE:
             raise ValueError("TARGET_BALANCE must be greater than INITIAL_BALANCE")
         
-        # Validate risk settings
-        if not 0 < self.config.MAX_RISK_PER_TRADE <= 0.1:  # Max 10% risk per trade
-            raise ValueError("MAX_RISK_PER_TRADE must be between 0 and 0.1 (10%)")
+        # Validate risk settings (AGGRESSIVE TRADING MODE)
+        if not 0 < self.config.MAX_RISK_PER_TRADE <= 1.0:  # Max 100% risk per trade
+            raise ValueError("MAX_RISK_PER_TRADE must be between 0 and 1.0 (100%)")
         
         if not 0 < self.config.POSITION_SIZE_PCT <= 1.0:
             raise ValueError("POSITION_SIZE_PCT must be between 0 and 1.0")
         
-        if not 0 < self.config.MAX_DAILY_LOSS <= 0.5:  # Max 50% daily loss
-            raise ValueError("MAX_DAILY_LOSS must be between 0 and 0.5 (50%)")
+        if not 0 < self.config.MAX_DAILY_LOSS <= 1.0:  # Max 100% daily loss
+            raise ValueError("MAX_DAILY_LOSS must be between 0 and 1.0 (100%)")
         
         # Validate trading pairs
         for symbol, config in self.config.TRADING_PAIRS.items():
@@ -460,8 +460,10 @@ class HyperliquidAutoTrader:
     def _sign_l1_action(self, action: dict, nonce: int) -> str:
         """Sign L1 action for Hyperliquid"""
         action_hash = self._get_action_hash(action, nonce)
+        # Remove '0x' prefix if present
+        secret_hex = self.config.API_SECRET.replace('0x', '') if self.config.API_SECRET.startswith('0x') else self.config.API_SECRET
         signature = hmac.new(
-            bytes.fromhex(self.config.API_SECRET),
+            bytes.fromhex(secret_hex),
             action_hash,
             hashlib.sha256
         ).digest()
@@ -662,11 +664,13 @@ class HyperliquidAutoTrader:
             
             if response.status_code == 200:
                 data = response.json()
-                price = data.get(symbol, 0)
+                # Convert symbol format: "BTC-USD" -> "BTC"
+                symbol_key = symbol.replace("-USD", "")
+                price = data.get(symbol_key, 0)
                 if price and float(price) > 0:
                     return float(price)
                 else:
-                    logger.warning(f"Invalid price data for {symbol}: {price}")
+                    logger.warning(f"Invalid price data for {symbol} (key: {symbol_key}): {price}")
                     return 0
             else:
                 logger.error(f"Failed to get price for {symbol}: {response.status_code} - {response.text}")
@@ -691,14 +695,14 @@ class HyperliquidAutoTrader:
         logger.info("="*50)
         logger.info(f"🎯 EXECUTING TRADE SIGNAL")
         logger.info(f"Setup: {signal.setup_type}")
-        logger.info(f"Score: {signal.confluence_score}/14")
+        logger.info(f"Balance Score: {signal.balance_score}/10")
         logger.info("="*50)
         
         # Send notification that we're about to trade
         self._send_trade_notification("SIGNAL", {
             'symbol': signal.symbol,
             'setup_type': signal.setup_type,
-            'confluence_score': signal.confluence_score,
+            'balance_score': signal.balance_score,
             'entry_price': signal.entry_price,
             'stop_loss': signal.stop_loss,
             'leverage': signal.leverage,
@@ -745,7 +749,7 @@ class HyperliquidAutoTrader:
             "take_profits": signal.take_profits,
             "entry_time": datetime.now(),
             "setup_type": signal.setup_type,
-            "confluence_score": signal.confluence_score,
+            "balance_score": signal.balance_score,
             "order_id": entry_result.get("order_id")
         }
         
@@ -809,7 +813,7 @@ class HyperliquidAutoTrader:
         current_hour = datetime.now().hour
         in_peak_hours = any(start <= current_hour < end for start, end in self.config.PEAK_HOURS)
         if not in_peak_hours:
-            logger.info(f"Outside peak hours, but taking A+ setup anyway (score: {signal.confluence_score})")
+            logger.info(f"Outside peak hours, but taking A+ balance setup anyway (score: {signal.balance_score}/10)")
         
         # ALMIGHTY ADDITION: Momentum check
         if self.config.MOMENTUM_FILTER:
@@ -848,11 +852,11 @@ class HyperliquidAutoTrader:
         # APPLY VOLATILITY ADJUSTMENT (Size down in high vol, up in low vol)
         position_value_usd *= vol_multiplier
         
-        # CONFLUENCE SCORE MULTIPLIER (Higher scores get slightly bigger size)
-        if signal.confluence_score >= 14:  # Perfect setup
+        # BALANCE SCORE MULTIPLIER (Higher scores get slightly bigger size)
+        if signal.balance_score >= 10:  # Perfect balance setup
+            position_value_usd *= 1.2
+        elif signal.balance_score >= 9:  # Excellent balance setup
             position_value_usd *= 1.1
-        elif signal.confluence_score >= 13:  # Excellent setup
-            position_value_usd *= 1.05
         
         # Ensure we have enough margin for the leverage
         margin_required = position_value_usd / actual_leverage
@@ -872,7 +876,7 @@ class HyperliquidAutoTrader:
         logger.info(f"   Current Balance: ${self.current_balance:.2f}")
         logger.info(f"   Base Position Value: ${desired_position_value:.2f} (90%)")
         logger.info(f"   Volatility Multiplier: {vol_multiplier:.2f}x")
-        logger.info(f"   Score Multiplier: {1.1 if signal.confluence_score >= 14 else 1.05 if signal.confluence_score >= 13 else 1.0:.2f}x")
+        logger.info(f"   Balance Multiplier: {1.2 if signal.balance_score >= 10 else 1.1 if signal.balance_score >= 9 else 1.0:.2f}x")
         logger.info(f"   Final Position Value: ${position_value_usd:.2f}")
         logger.info(f"   Leverage: {actual_leverage}x")
         logger.info(f"   Margin Required: ${margin_required:.2f}")
@@ -932,7 +936,7 @@ class HyperliquidAutoTrader:
             "timestamp": datetime.now().isoformat(),
             "symbol": signal.symbol,
             "setup_type": signal.setup_type,
-            "confluence_score": signal.confluence_score,
+            "balance_score": signal.balance_score,
             "entry_price": signal.entry_price,
             "stop_loss": signal.stop_loss,
             "take_profits": signal.take_profits,
@@ -1109,7 +1113,7 @@ Progress: {performance['progress_to_goal']:.1%} to $10K goal
 ━━━━━━━━━━━━━━━━━━
 Symbol: {data['symbol']}
 Setup: {data['setup_type']}
-Score: {data['confluence_score']}/14
+Balance Score: {data['balance_score']}/10
 Entry: ${data['entry_price']:,.2f}
 Stop: ${data['stop_loss']:,.2f}
 Leverage: {data['leverage']}x
@@ -1335,7 +1339,7 @@ Closed: {data['percentage']}% of position
 class TradeSignal:
     setup_type: str
     symbol: str
-    confluence_score: int
+    balance_score: int  # Jim Dalton's Balance Score (0-10)
     entry_price: float
     stop_loss: float
     take_profits: List[Tuple[float, float]]
@@ -1380,7 +1384,7 @@ class ChallengeBot:
                 # Check for A+ setups
                 signal = await self._scan_for_setups()
                 
-                if signal and signal.confluence_score >= self.config.MIN_CONFLUENCE_SCORE:
+                if signal and signal.balance_score >= self.config.MIN_BALANCE_SCORE:
                     # We have an A+ setup!
                     logger.info(f"🎯 A+ SETUP DETECTED!")
                     
@@ -1441,34 +1445,34 @@ Win Rate: {(self.trader.winning_trades / self.trader.total_trades * 100):.1f}%
             # Analyze for A+ setups
             signal = await self._analyze_symbol(symbol, price)
             
-            if signal and signal.confluence_score > best_score:
+            if signal and signal.balance_score > best_score:
                 best_signal = signal
-                best_score = signal.confluence_score
-                logger.info(f"   {symbol}: Score {signal.confluence_score}/14 - {signal.setup_type}")
+                best_score = signal.balance_score
+                logger.info(f"   {symbol}: Balance Score {signal.balance_score}/10 - {signal.setup_type}")
             elif signal:
-                logger.info(f"   {symbol}: Score {signal.confluence_score}/14 (insufficient)")
+                logger.info(f"   {symbol}: Balance Score {signal.balance_score}/10 (insufficient)")
             else:
                 # Get some basic data to show why it failed
                 try:
-                    funding_data = await self.get_funding_rate(symbol)
+                    funding_data = await self.trader.get_funding_rate(symbol)
                     current_funding = funding_data.get("current_funding", 0)
                     logger.info(f"   {symbol}: No signal (funding: {current_funding*100:.2f}%)")
                 except:
                     logger.info(f"   {symbol}: No signal")
         
         if best_signal:
-            logger.info(f"🎯 Best setup: {best_signal.symbol} with score {best_signal.confluence_score}/14")
+            logger.info(f"🎯 Best setup: {best_signal.symbol} with Balance Score {best_signal.balance_score}/10")
             # Log detailed breakdown
-            logger.info(f"📋 Signal Details:")
+            logger.info(f"📋 Jim Dalton Balance Analysis:")
             for reason in best_signal.reasons:
                 logger.info(f"   ✓ {reason}")
         else:
-            logger.info("   No A+ setups found this scan")
+            logger.info("   No A+ balance setups found this scan")
         
         return best_signal
     
     async def _analyze_symbol(self, symbol: str, price: float) -> Optional[TradeSignal]:
-        """Analyze a symbol for A+ setups with ENHANCED MARKET DATA"""
+        """Analyze symbol using Jim Dalton's Market Profile Balance Levels - A+ SETUPS ONLY"""
         
         # Get symbol-specific config
         symbol_config = self.config.TRADING_PAIRS.get(symbol, {})
@@ -1476,181 +1480,121 @@ Win Rate: {(self.trader.winning_trades / self.trader.total_trades * 100):.1f}%
         max_leverage = symbol_config.get('max_leverage', 5)
         min_leverage = max(symbol_config.get('min_leverage', 5), self.config.GLOBAL_MIN_LEVERAGE)
         
-        # GET REAL MARKET DATA FOR EDGE
-        funding_data = await self.get_funding_rate(symbol)
-        volume_data = await self.get_volume_profile(symbol)
-        structure_data = await self.analyze_market_structure(symbol)
+        # Get market data for analysis
+        volume_data = await self.trader.get_volume_profile(symbol)
+        structure_data = await self.trader.analyze_market_structure(symbol)
         
-        # Initialize score and reasons
-        score = 9  # Base score, need 11+ for A+ setup
+        # Initialize Jim Dalton Balance Score (0-10 scale)
+        balance_score = 0
         reasons = []
         
-        # ===== ENHANCED SCORING SYSTEM WITH REAL DATA =====
+        # ===== JIM DALTON'S MARKET PROFILE BALANCE ANALYSIS =====
         
-        # 1. FUNDING RATE ANALYSIS (MASSIVE EDGE!)
-        current_funding = funding_data.get("current_funding", 0)
-        predicted_funding = funding_data.get("predicted_funding", 0)
-        
-        if current_funding < -0.001:  # Negative funding > 0.1%
-            score += 3
-            reasons.append(f"Strong negative funding ({current_funding*100:.2f}% - shorts paying longs)")
-        elif current_funding < -0.0005:  # Negative funding > 0.05%
-            score += 2  
-            reasons.append(f"Negative funding ({current_funding*100:.2f}% - short squeeze potential)")
-        
-        if predicted_funding < current_funding < 0:  # Funding getting more negative
-            score += 1
-            reasons.append("Funding trend increasingly negative (squeeze building)")
-        
-        # 2. VOLUME ANALYSIS (Key for entry timing)
-        volume_surge = volume_data.get("volume_surge", 1)
+        # 1. VALUE AREA RELATIONSHIP (3 points max) - Core of Dalton's method
         vpoc_price = volume_data.get("vpoc_price", 0)
-        
-        if volume_surge >= 2.5:  # 2.5x average volume
-            score += 2
-            reasons.append(f"Massive volume surge ({volume_surge:.1f}x average)")
-        elif volume_surge >= 1.8:  # 1.8x average volume
-            score += 1
-            reasons.append(f"Strong volume increase ({volume_surge:.1f}x average)")
-        
-        # Check if price is near VPOC (high volume area)
         if vpoc_price > 0:
-            price_distance_from_vpoc = abs(price - vpoc_price) / price
-            if price_distance_from_vpoc < 0.02:  # Within 2% of VPOC
-                score += 2
-                reasons.append(f"Price near VPOC (${vpoc_price:.2f}) - high volume support")
+            vpoc_distance = abs(price - vpoc_price) / price
+            
+            if vpoc_distance < 0.005:  # Within 0.5% of VPOC (Perfect balance)
+                balance_score += 3
+                reasons.append(f"Perfect VPOC alignment at ${vpoc_price:.2f} - maximum institutional interest")
+            elif vpoc_distance < 0.015:  # Within 1.5% of VPOC (Good balance)
+                balance_score += 2
+                reasons.append(f"Near VPOC at ${vpoc_price:.2f} - strong institutional zone")
+            elif vpoc_distance < 0.03:  # Within 3% of VPOC (Acceptable balance)
+                balance_score += 1
+                reasons.append(f"Approaching VPOC at ${vpoc_price:.2f} - institutional support")
         
-        # 3. OPEN INTEREST ANALYSIS
-        open_interest = funding_data.get("open_interest", 0)
-        volume_24h = funding_data.get("volume_24h", 0)
-        
-        if open_interest > 0 and volume_24h > 0:
-            oi_volume_ratio = open_interest / volume_24h
-            if oi_volume_ratio > 5:  # High OI relative to volume
-                score += 1
-                reasons.append("High open interest vs volume - coiled spring setup")
-        
-        # 4. MULTI-TIMEFRAME CONFLUENCE (Enhanced)
-        import random
-        mtf_aligned = random.random() > 0.7  # Mock - replace with real MTF analysis
-        if mtf_aligned:
-            score += 2
-            reasons.append("15m, 1H, and 4H all bullish")
-        
-        # 5. LIQUIDITY SWEEP CHECK
-        liquidity_swept = random.random() > 0.8  # Mock - replace with wick analysis
-        if liquidity_swept:
-            score += 3
-            reasons.append("Liquidity swept below support (stop hunt complete)")
-        
-        # 6. MOMENTUM DIVERGENCE
-        divergence = random.random() > 0.7  # Mock - replace with RSI divergence
-        if divergence:
-            score += 2
-            reasons.append("Hidden bullish divergence on 4H")
-        
-        # 7. SESSION TIMING BOOST
-        current_hour = datetime.now().hour
-        london_session = 8 <= current_hour <= 11
-        ny_session = 13 <= current_hour <= 16
-        
-        if london_session or ny_session:
-            score += 1
-            session_name = "London" if london_session else "NY"
-            reasons.append(f"{session_name} session active - institutional volume")
-        
-        # 8. MARKET STRUCTURE ANALYSIS (Trend + Liquidity Grabs)
+        # 2. MARKET STRUCTURE BALANCE (2 points max) - Dalton's structural context
         trend = structure_data.get("trend", "neutral")
-        structure_score_val = structure_data.get("structure_score", 0)
         liquidity_grabbed = structure_data.get("liquidity_grabbed", False)
+        
+        if trend == "strong_uptrend" and liquidity_grabbed:
+            balance_score += 2
+            reasons.append("Strong uptrend with liquidity sweep - perfect Dalton balance")
+        elif trend == "uptrend" or liquidity_grabbed:
+            balance_score += 1
+            reasons.append("Partial balance - either trend or liquidity component present")
+        
+        # 3. VOLUME CONFIRMATION (2 points max) - Dalton's volume validation
+        volume_surge = volume_data.get("volume_surge", 1)
+        avg_volume = volume_data.get("avg_volume_24h", 0)
+        
+        if volume_surge >= 2.0:  # 2x surge = institutional interest
+            balance_score += 2
+            reasons.append(f"Massive volume surge ({volume_surge:.1f}x) - institutional accumulation")
+        elif volume_surge >= 1.5:  # 1.5x surge = good interest
+            balance_score += 1
+            reasons.append(f"Strong volume ({volume_surge:.1f}x) - building institutional interest")
+        
+        # 4. TIME-PRICE OPPORTUNITY (2 points max) - Dalton's time factor
+        current_hour = datetime.now().hour
+        
+        # London/NY overlap (8-11 UTC) or NY session (13-16 UTC) = maximum institutional activity
+        if 8 <= current_hour <= 11:  # London/NY overlap
+            balance_score += 2
+            reasons.append("London/NY overlap - maximum institutional activity window")
+        elif 13 <= current_hour <= 16:  # NY session
+            balance_score += 1
+            reasons.append("NY session - institutional activity window")
+        
+        # 5. BALANCE AREA BREAKOUT (1 point max) - Dalton's breakout methodology
         key_levels = structure_data.get("key_levels", [])
-        
-        # Trend scoring
-        if trend == "strong_uptrend":
-            score += 3
-            reasons.append("Strong uptrend: higher highs + higher lows confirmed")
-        elif trend == "uptrend":
-            score += 2
-            reasons.append("Uptrend: higher highs structure intact")
-        elif trend == "consolidation":
-            score += 1
-            reasons.append("Consolidation: coiling for breakout")
-        
-        # Liquidity grab bonus (stop hunt completed)
-        if liquidity_grabbed:
-            score += 2
-            reasons.append("Liquidity grabbed below recent lows + recovery")
-        
-        # Support level confluence
         if key_levels:
             for level in key_levels:
                 if abs(price - level) / price < 0.01:  # Within 1% of key level
-                    score += 1
-                    reasons.append(f"Price at key S/R level (${level:.2f})")
+                    balance_score += 1
+                    reasons.append(f"At key balance level ${level:.2f} - Dalton breakout zone")
                     break
         
-        # 9. CORRELATION FILTER (Avoid overexposure)
-        if self.current_position:
-            current_symbol = self.current_position.get("symbol", "")
-            # BTC-ETH correlation check
-            if (symbol == "BTC-USD" and current_symbol == "ETH-USD") or \
-               (symbol == "ETH-USD" and current_symbol == "BTC-USD"):
-                score -= 1  # Reduce score for correlated exposure
-                reasons.append("Correlation penalty - already exposed to correlated asset")
-        
-        if score < self.config.MIN_CONFLUENCE_SCORE:
+        # Jim Dalton requires MINIMUM 8/10 for A+ setups
+        if balance_score < self.config.MIN_BALANCE_SCORE:
             return None
         
-        # Calculate stop and targets based on symbol volatility
-        # CRITICAL: Tighter stops for your 90% position strategy
+        # ===== POSITION SIZING BASED ON BALANCE QUALITY =====
+        
+        # Perfect balance (9-10) = maximum leverage
+        # Good balance (8) = base leverage
+        if balance_score >= 9:
+            leverage = min(max_leverage, base_leverage * 2)  # Double leverage for perfect setups
+            setup_type = "Perfect Balance Breakout"
+        else:
+            leverage = base_leverage
+            setup_type = "Balance Area Breakout"
+        
+        leverage = max(leverage, min_leverage)
+        
+        # ===== DALTON'S RISK MANAGEMENT =====
+        
+        # Stops based on balance area violations (Dalton's method)
         if symbol == 'PUMP-USD':
-            stop_pct = 0.03  # 3% stop (tighter than typical for safety)
+            stop_pct = 0.05  # 5% for meme coins
         elif symbol == 'HYPE-USD':
-            stop_pct = 0.025  # 2.5% stop
+            stop_pct = 0.04  # 4% for volatile alts
         elif symbol in ['ETH-USD', 'SOL-USD']:
-            stop_pct = 0.02   # 2% stop
+            stop_pct = 0.03  # 3% for major alts
         else:  # BTC
-            stop_pct = 0.015  # 1.5% stop (tightest for most liquid)
+            stop_pct = 0.02  # 2% for BTC (most liquid)
         
         stop_loss = price * (1 - stop_pct)
         
-        # Risk-based targets (adjusted for 90% positions)
+        # Targets based on balance extension theory
         risk = price - stop_loss
-        tp1 = price + risk * 2    # 2R (hit more TPs with big positions)
-        tp2 = price + risk * 4    # 4R 
-        tp3 = price + risk * 7    # 7R (moon shot)
+        tp1 = price + risk * 1.5  # 1.5R (quick balance extension)
+        tp2 = price + risk * 3.0  # 3R (full balance extension)
+        tp3 = price + risk * 5.0  # 5R (extreme extension)
         
-        # Determine leverage based on score and symbol limits
-        if score >= 14:  # God-tier
-            leverage = min(base_leverage * 2, max_leverage)
-        elif score >= 12:  # Enhanced
-            leverage = min(int(base_leverage * 1.5), max_leverage)
-        else:  # Standard A+
-            leverage = base_leverage
-        
-        # Ensure minimum leverage of 5x
-        leverage = max(leverage, min_leverage)
-        
-        # Log leverage decision
-        logger.info(f"   {symbol} leverage: {leverage}x (min: {min_leverage}x, max: {max_leverage}x)")
-        
-        # Ensure we have enough reasons for the signal
-        if len(reasons) < 3:
-            reasons.extend([
-                "Price at golden pocket + POC confluence",
-                "4H hidden bullish divergence", 
-                "Multi-timeframe support alignment"
-            ])
+        logger.info(f"   {symbol} leverage: {leverage}x (Balance Score: {balance_score}/10)")
         
         return TradeSignal(
-            setup_type="Institutional Reload",
+            setup_type=setup_type,
             symbol=symbol,
-            confluence_score=score,
+            balance_score=balance_score,  # Changed from confluence_score
             entry_price=price,
             stop_loss=stop_loss,
-            take_profits=[(tp1, 0.4), (tp2, 0.4), (tp3, 0.2)],
+            take_profits=[(tp1, 0.5), (tp2, 0.3), (tp3, 0.2)],  # Dalton's distribution
             leverage=leverage,
-            reasons=reasons[:6],  # Limit to 6 reasons max
+            reasons=reasons,
             timestamp=datetime.now()
         )
     
@@ -1724,4 +1668,11 @@ def quick_start():
 
 # ===== MAIN ENTRY =====
 if __name__ == "__main__":
-    quick_start()
+    # Skip interactive input and run directly
+    print("\n🚀 Starting the $1K Challenge Bot...")
+    print("Target: Turn $1,000 into $10,000")
+    print("Strategy: A+ setups only\n")
+    
+    # Run the bot
+    bot = ChallengeBot()
+    asyncio.run(bot.run())
